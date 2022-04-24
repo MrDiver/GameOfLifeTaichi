@@ -1,14 +1,15 @@
 
+from operator import ne
 import time
 import numpy as np
 import taichi as ti
-ti.init(arch=ti.gpu, kernel_profiler=True)
+ti.init(arch=ti.gpu, kernel_profiler=True, print_ir=False)
 
-chunk_size = 11
-width, height = 1280, 1024
+chunk_size = 8
+width, height = 9*100, 9*100
 width = (width//chunk_size)*chunk_size
 height = (height//chunk_size)*chunk_size
-zoom = 6
+zoom = 4
 print(width, height)
 
 # Create a 640x480 scalar field, each of its elements representing a pixel value (f32)
@@ -16,10 +17,13 @@ gray_scale_image = ti.field(dtype=ti.f32, shape=(width, height))
 next_step = ti.field(dtype=ti.f32, shape=(width, height))
 gray_scale_image2 = ti.field(dtype=ti.f32)
 next_step2 = ti.field(dtype=ti.f32)
-ti.root.dense(ti.ij, (width//chunk_size, height//chunk_size)).dense(ti.ij,(chunk_size, chunk_size)).place(gray_scale_image2)
-ti.root.dense(ti.ij, (width//chunk_size, height//chunk_size)).dense(ti.ij,(chunk_size, chunk_size)).place(next_step2)
+# ti.root.dense(ti.ij, (width//chunk_size, height//chunk_size)).dense(ti.ij,(chunk_size, chunk_size)).place(gray_scale_image2)
+ti.root.dense(ti.ij, (width, height)).place(gray_scale_image2)
+ti.root.dense(ti.ij, (width, height)).place(next_step2)
 
 scaled_image = ti.Vector.field(n=1, dtype=ti.f32, shape=(width*zoom, height*zoom))
+scaled_image2 = ti.Vector.field(n=1, dtype=ti.f32)
+ti.root.dense(ti.ij, (width,height)).dense(ti.ij,(zoom,zoom)).place(scaled_image2)
 
 @ti.kernel
 def fill_image(image: ti.template() ,fill_ratio: ti.f32):
@@ -68,22 +72,16 @@ def game_step(current_state: ti.template(), next_state: ti.template()):
         
 @ti.kernel
 def game_step2(current_state: ti.template(), next_state: ti.template()):
+    
     for i,j in current_state:       
-        # Remove middle cell from neighbours
-        count: ti.f32 = 0
-        
+        ti.block_local(current_state)
+        count: ti.f32 = 0.0
         # count neighbors
-        count += current_state[(i-1) %width, (j-1)%height]
-        count += current_state[i,            (j-1)%height]
-        count += current_state[(i+1) %width, (j-1)%height]
+        ti.loop_config(serialize=True)
+        for x,y in ti.static(ti.ndrange((-1,2),(-1,2))):
+            if x != 0 or y != 0:
+                ti.atomic_add(count, current_state[(i+x) %width, (j+y)%height])
         
-        count += current_state[(i-1) %width, j]
-        count += current_state[(i+1) %width, j]
-
-        count += current_state[(i-1) %width, (j+1)%height]
-        count += current_state[i,            (j+1)%height]
-        count += current_state[(i+1) %width, (j+1)%height]
-
         # Apply rules
         if current_state[i,j] == 1.0:
             next_state[i, j] = 1.0
@@ -97,6 +95,7 @@ def game_step2(current_state: ti.template(), next_state: ti.template()):
                 
     # Move data to current_state
     for i,j in next_state:
+        ti.block_local(next_state)
         # Apply step
         if next_state[i,j] == 1.0:
             current_state[i,j] = 1.0
@@ -183,13 +182,14 @@ def profile():
     fill_image(gray_scale_image, 0.5)
     copy_field(gray_scale_image, gray_scale_image2)
     ti.profiler.clear_kernel_profiler_info()  # clear all records 
-    for i in range(5000):
+    for i in range(10):
         game_step(gray_scale_image, next_step)
         game_step2(gray_scale_image2, next_step2)
         # zoom_image(gray_scale_image, scaled_image)
-    # ti.profiler.print_kernel_profiler_info('trace')
+    
     ti.profiler.print_kernel_profiler_info()
-    ti.profiler.clear_kernel_profiler_info()  # clear all records        
+    ti.profiler.clear_kernel_profiler_info()  # clear all records    
+        
     assert(np.allclose(gray_scale_image.to_numpy() , gray_scale_image2.to_numpy()))
 
 if __name__ == "__main__":
